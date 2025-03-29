@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Splitter (Custom User Input)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.16.0/pdf-lib.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+</head>
+
+<body>
+    <h2>PDF Splitter</h2>
+
+    <input type="file" id="pdfInput" accept="application/pdf">
+    <p><strong>Total Pages:</strong> <span id="totalPages">0</span></p>
+
+    <label>How many PDFs do you want?</label>
+    <input type="number" id="numSplits" min="1" disabled>
+    <button id="setSplitDetailsBtn" disabled>Next</button>
+
+    <div id="splitDetails"></div>
+
+    <p><strong>Remaining Pages:</strong> <span id="remainingPages">0</span></p>
+
+    <button id="splitPDFBtn" disabled>Split & Download</button>
+
+    <script>
+        let pdfDoc;
+        let totalPages = 0;
+        let pdfBytes;
+        let remainingPages = 0;
+        let splitSections = [];
+
+        document.getElementById('pdfInput').addEventListener('change', async (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.readAsArrayBuffer(file);
+            reader.onload = async function() {
+                pdfBytes = new Uint8Array(reader.result);
+                pdfDoc = await pdfjsLib.getDocument({ data: pdfBytes }).promise;
+                totalPages = pdfDoc.numPages;
+                remainingPages = totalPages;
+                
+                document.getElementById('totalPages').innerText = totalPages;
+                document.getElementById('remainingPages').innerText = remainingPages;
+                document.getElementById('numSplits').disabled = false;
+                document.getElementById('setSplitDetailsBtn').disabled = false;
+            };
+        });
+
+        document.getElementById('setSplitDetailsBtn').addEventListener('click', () => {
+            document.getElementById('splitDetails').innerHTML = ''; 
+            splitSections = [];
+            remainingPages = totalPages;
+            document.getElementById('remainingPages').innerText = remainingPages;
+            let numSplits = parseInt(document.getElementById('numSplits').value);
+
+            if (numSplits < 1 || numSplits > totalPages) {
+                alert("Invalid number of PDFs. Must be between 1 and total pages.");
+                return;
+            }
+
+            for (let i = 0; i < numSplits; i++) {
+                const inputDiv = document.createElement('div');
+                inputDiv.innerHTML = `
+                    <label>Pages for PDF ${i + 1} (Max ${remainingPages}): </label>
+                    <input type="number" class="splitInput" min="1" max="${remainingPages}" value="1">
+                `;
+                document.getElementById('splitDetails').appendChild(inputDiv);
+                splitSections.push(1);
+            }
+
+            document.getElementById('splitPDFBtn').disabled = false;
+
+            // Add event listeners for dynamic page adjustment
+            document.querySelectorAll('.splitInput').forEach(input => {
+                input.addEventListener('input', updateRemainingPages);
+            });
+        });
+
+        function updateRemainingPages() {
+            let totalAssigned = 0;
+            let inputs = document.querySelectorAll('.splitInput');
+
+            inputs.forEach(input => {
+                let value = parseInt(input.value) || 0;
+                totalAssigned += value;
+            });
+
+            let newRemaining = totalPages - totalAssigned;
+            if (newRemaining < 0) {
+                alert("Total pages assigned exceed the document's total pages! Adjust your values.");
+                return;
+            }
+
+            document.getElementById('remainingPages').innerText = newRemaining;
+
+            // Update max pages dynamically for the remaining inputs
+            let lastInput = inputs[inputs.length - 1];
+            lastInput.max = newRemaining + parseInt(lastInput.value);
+        }
+
+        document.getElementById('splitPDFBtn').addEventListener('click', async () => {
+            if (!pdfDoc || !pdfBytes) {
+                alert("Please upload a PDF first.");
+                return;
+            }
+
+            const inputs = document.querySelectorAll('.splitInput');
+            let pagesToSplit = [];
+            let totalInputPages = 0;
+            
+            inputs.forEach(input => {
+                const numPages = parseInt(input.value);
+                pagesToSplit.push(numPages);
+                totalInputPages += numPages;
+            });
+
+            if (totalInputPages > totalPages) {
+                alert("Total pages exceed original PDF page count. Adjust your splits.");
+                return;
+            }
+
+            const originalPdf = await PDFLib.PDFDocument.load(pdfBytes);
+            let startPage = 0;
+
+            for (let i = 0; i < pagesToSplit.length; i++) {
+                const pageCount = pagesToSplit[i];
+                if (startPage >= totalPages) break;
+
+                const newPdf = await PDFLib.PDFDocument.create();
+                const copiedPages = await newPdf.copyPages(
+                    originalPdf, 
+                    Array.from({ length: pageCount }, (_, index) => startPage + index)
+                );
+
+                copiedPages.forEach(page => newPdf.addPage(page));
+                const newPdfBytes = await newPdf.save();
+
+                // Send the split PDF to the n8n webhook
+                sendToWebhook(newPdfBytes, `Split_Part_${i + 1}.pdf`);
+
+                startPage += pageCount;
+            }
+        });
+
+        function downloadPDF(pdfBytes, fileName) {
+            const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = fileName;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        async function sendToWebhook(pdfBytes, fileName) {
+            const formData = new FormData();
+            formData.append('file', new Blob([pdfBytes], { type: 'application/pdf' }), fileName);
+
+            try {
+                const response = await fetch('https://primary-production-8e9a.up.railway.app/webhook-test/dc13517c-cfe3-4e3a-afd7-7ef07113f158', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (response.ok) {
+                    console.log('PDF successfully sent to webhook!');
+                } else {
+                    console.error('Failed to send PDF to webhook', await response.text());
+                }
+            } catch (error) {
+                console.error('Error sending PDF to webhook', error);
+            }
+        }
+    </script>
+</body>
+
+</html>
